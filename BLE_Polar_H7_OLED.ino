@@ -1,18 +1,32 @@
-// https://forum.arduino.cc/t/connect-nano-sense-to-polar-bluetooth-heart-rate-monitor/1169822/22
-//
 // BLE_Polar_H7_OLED
 // 
+// Author:    Jurgen G Schmidt (www.jgscraft.com)
+//            https://www.instructables.com/member/jgschmidt/instructables/
+//            https://github.com/jgscraft
+//
+// BLE code derived from https://forum.arduino.cc/t/connect-nano-sense-to-polar-bluetooth-heart-rate-monitor/1169822/22
+//
 // Hardware:  UNO R4 WiFi 
 //            TinyS3 worked for initial test and then later wouldn't even run blink  
 //            Couldn't get QT Py ESP32-S3 to load on 1.8 nor 2.3
 //            OLED 128x64 SH1106 or SSD1309 - ended up using 2.4" HiLetgo SSD1309
 //            Polar H7 Chest strap
 //
-//            Adafruit ItsyBitsy ESP32  - verified 240703
-//            Adafruit Feather ESP32 V2 - verified 240608
-//            HiLetgo ESP32 Dev Module  - verified 240703
+//            Recheck final version...
 //            Arduino UNO WiFi R4       - verified 240703
-//            
+//            Adafruit Feather ESP32 V2 - verified 240608
+//            Adafruit ItsyBitsy ESP32  - verified 240703
+//            HiLetgo ESP32 Dev Module  - verified 240703
+//
+// Notes: UNO R4 WiFi I2C on STEMMA plug is on Wire1 as opposed to Wire which is on the header pins. Modify display instantiation 
+//        as needed around line 77 / 87
+//
+// TODO:  Learn more about BLE protocols
+//        Cleanup code around voltage detector - put defines in global area
+//        Attempt to reconnect after losing connection
+//        Recover from failed connection attempts
+//        Support multiple sources and look for strongest RSSI
+//        Test with other Polar, like the newer H10
 //
 // 240509 - (JGS) Bluetooth code is copied from link above, scroll down for last code example
 //        - BLE doesn't always start with UNO R4 WiFi reset, needs full power off reset
@@ -34,6 +48,8 @@
 //
 // 240704 - using ItsyBitsy ESP32 along with LiPo Amigo Pro, use voltage divider to measure battery voltage on A2
 //
+// 240712 - cleanup for Git
+//
 
 // Select one of these...
 #define OLED_SH1106               // 128x64
@@ -47,6 +63,10 @@
 #include <Adafruit_GFX.h>             // Adafruit graphics library
 #include <U8g2_for_Adafruit_GFX.h>    // use U8g2 font library, select u8g2 font from here: https://github.com/olikraus/u8g2/wiki/fntlistall
 
+//------------------------------------- GLOBALS ----------------------------------------
+
+//============ Display ============
+
 #ifdef OLED_SH1106
   #include <Adafruit_SH110X.h>
   #define SCREEN_WIDTH 128 // OLED display width, in pixels
@@ -55,6 +75,7 @@
   //#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
   #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
   Adafruit_SH1106G display = Adafruit_SH1106G(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+  //Adafruit_SH1106G display = Adafruit_SH1106G(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire1, OLED_RESET);  // for UNO R4 WiFi STEMMA plug
 #endif
 
 #ifdef OLED_SSD1306
@@ -68,6 +89,8 @@
 
 U8G2_FOR_ADAFRUIT_GFX u8g2_for_adafruit_gfx;          // all text output goes through this
 
+//============ Bluetooth BLE ============
+
 const char* deviceName = "Polar H7 8C505015";       // <-- from BLE scan, also matches ID: on Polar case
 //const char* deviceName = "Polar H7 C248F711";       
 const char* serviceUUID = "180D";
@@ -78,15 +101,14 @@ BLEService heartRateService;
 BLECharacteristic heartRateMeasurementCharacteristics;
 bool isSubscribed = false; // new flag
 
+//------------------------------------- SETUP ----------------------------------------
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-  //while (!Serial); // Comment out after development, otherwise won't run on battery only
+  delay(1000);            // all-purpose delay to be sure serial, OLED, BT, etc. are powered up 
+  //while (!Serial);      // Comment out after development, otherwise won't run on battery only
   Serial.print(__DATE__);  Serial.print("  "); Serial.println( __FILE__);
 
-
 #ifdef OLED_SH1106
-  delay(250); // wait for the OLED to power up
   display.begin(i2c_Address, true); // Address 0x3C default
 #endif
 
@@ -98,8 +120,8 @@ void setup() {
   }
 #endif
 
- u8g2_for_adafruit_gfx.begin(display);                 // associate text with a display
- display.clearDisplay();                               // clear the graphcis buffer  
+ u8g2_for_adafruit_gfx.begin(display);                  // associate text with a display
+ display.clearDisplay();                                // clear the graphcis buffer  
 //  u8g2_for_adafruit_gfx.setFont(u8g2_font_8x13_tf);   // select u8g2 font from here: https://github.com/olikraus/u8g2/wiki/fntlistall
   u8g2_for_adafruit_gfx.setFont(u8g2_font_6x10_tf);     // select u8g2 font from here: https://github.com/olikraus/u8g2/wiki/fntlistall
   u8g2_for_adafruit_gfx.setFontMode(1);                 // use u8g2 transparent mode (this is default)
@@ -120,7 +142,7 @@ void setup() {
   u8g2_for_adafruit_gfx.print(measuredvbat);            // display LiPo battery voltage
 #endif
 
-#ifdef ARDUINO_ADAFRUIT_ITSYBITSY_ESP32                // this board has builtin has voltage detector
+#ifdef ARDUINO_ADAFRUIT_ITSYBITSY_ESP32                // Added voltage detector to this board
   #define VBATPIN A2
   float measuredvbat = analogReadMilliVolts(VBATPIN);
   measuredvbat *= 2;    // we divided by 2, so multiply back
@@ -132,7 +154,7 @@ void setup() {
   u8g2_for_adafruit_gfx.print(measuredvbat);            // display LiPo battery voltage
 #endif
 
-  display.display();                          
+  display.display();                                    // refresh display with new content
   u8g2_for_adafruit_gfx.setCursor(0,23);                // setup for next line
 
   if (!BLE.begin()) {
@@ -148,6 +170,7 @@ void setup() {
   display.display();                                 
 }
 
+//------------------------------------- LOOP ----------------------------------------
 void loop() {
   if (!isSubscribed) {
     BLE.scan();
